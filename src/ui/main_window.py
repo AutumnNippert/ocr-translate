@@ -77,6 +77,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.list.itemSelectionChanged.connect(self.update_details)
 
+        self.mouse_update_timer = QtCore.QTimer(self)
+        self.mouse_update_timer.timeout.connect(self.refresh_list)
+        self.mouse_update_timer.start(50)  # 20 times per second
+
     def init_workers_async(self):
         # Use a QThreadPool for async init
         from concurrent.futures import ThreadPoolExecutor
@@ -162,13 +166,43 @@ class MainWindow(QtWidgets.QMainWindow):
             if selected_lbl:
                 selected_word = html.unescape(selected_lbl.text().split("<br>")[0].replace("<b>", "").replace("</b>", ""))
 
+        # Compute mouse position in capture area coordinates
+        mouse_video_pos = None
+        global_mouse_pos = QtGui.QCursor.pos()
+        mx, my = global_mouse_pos.x(), global_mouse_pos.y()
+
+        # Use the monitor/capture area geometry
+        capture_x = self.screen_grabber.capture_x
+        capture_y = self.screen_grabber.capture_y
+        capture_w = self.screen_grabber.capture_w
+        capture_h = self.screen_grabber.capture_h
+
+        if (capture_x <= mx < capture_x + capture_w) and (capture_y <= my < capture_y + capture_h):
+            mouse_video_pos = (mx - capture_x, my - capture_y)
+            # Mouse is over the captured monitor
+        else:
+            mouse_video_pos = None
+            # Mouse is not over the captured monitor
+
         scored = []
         for word, meta in self.words.items():
+            bbox = meta["bbox"]
+            # print(f"[DEBUG] Word '{word}' bbox: {bbox}")
+            # Compute distance from mouse to bbox center
+            if mouse_video_pos is not None:
+                x0, y0, x1, y1 = bbox
+                cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+                dist = ((mouse_video_pos[0] - cx) ** 2 + (mouse_video_pos[1] - cy) ** 2) ** 0.5
+                # print(f"[DEBUG] Distance from mouse to '{word}': {dist:.1f}")
+            else:
+                dist = float('inf')
             score = meta["freq"]
-            scored.append((score, word))
-        scored.sort(reverse=True)
+            # Sort by distance (closer first), then by frequency (higher first)
+            scored.append((dist, -score, word))
+
+        scored.sort()
         self.list.clear()
-        for _, word in scored:
+        for _, _, word in scored:
             gloss_data = self.glosses.get(word, {})
             glosses = [s["definition"] for s in gloss_data.get("senses", [])][:3] if gloss_data else []
             if glosses:
@@ -192,6 +226,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Restore scroll position
         self.list.verticalScrollBar().setValue(scroll_pos)
+        self.update_details()
 
     def update_fps(self):
         fps = self.fc / max(1, self.t.elapsed() / 1000)

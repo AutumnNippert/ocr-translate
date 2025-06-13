@@ -44,7 +44,7 @@ class OCRWorker(QtCore.QThread):
         # gray = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
         #                              cv2.THRESH_BINARY, 11, 2)
         data = pytesseract.image_to_data(
-            gray, lang='deu', config="--oem 1 --psm 6", output_type=pytesseract.Output.DICT
+            gray, lang='deu', config="--oem 1 --psm 11", output_type=pytesseract.Output.DICT
         )
         words = []
         n_boxes = len(data['level'])
