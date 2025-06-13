@@ -9,20 +9,24 @@ import sys, time, queue, re, logging
 from typing import Dict, List, Tuple
 import numpy as np; import cv2; from mss import mss
 from PySide6 import QtCore, QtGui, QtWidgets; import pytesseract
+import html, concurrent.futures           #  ← add
+import translate                           #  ← the helper you wrote
+
+POOL = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 
 # ───── debug switch ────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 DBG = True
 # ───────────────── CONFIG ──────────────────────────────────────
 LANG_OCR         = "deu+eng"
-CONF_MIN_FAST    = 55
+CONF_MIN_FAST    = 20
 CONF_MIN_DEEP    = 60
-FAST_SCALE       = 0.7          # ← NEW  (0.5 ⇒ 2160 p → 1080 p)
-UPSCALE_FACTOR   = 2.0          # deep pass enlargement
-OCR_INTERVAL     = 30
-ROIS_PER_FRAME   = 30           # max ROIs per frame
-NUM_WORKERS      = 3
-WORD_MAX_MISSES  = 20
+FAST_SCALE       = 0.5          # ← NEW  (0.5 ⇒ 2160 p → 1080 p)
+UPSCALE_FACTOR   = 3          # deep pass enlargement
+OCR_INTERVAL     = 5
+ROIS_PER_FRAME   = 100           # max ROIs per frame
+NUM_WORKERS      = 2
+WORD_MAX_MISSES  = 100
 HOVER_BONUS      = 1000
 FONT_FAMILY      = "Noto Sans"; FONT_SIZE_PT = 12
 
@@ -89,8 +93,12 @@ class OCRWorker(QtCore.QThread):
     def _fast_rois(self,img)->List[Tuple[int,int,int,int]]:
         small=cv2.resize(img,(0,0),fx=FAST_SCALE,fy=FAST_SCALE)
         gray=preprocess_fast(small)
-        d=pytesseract.image_to_data(gray,lang=LANG_OCR,config=TESS_FAST_CFG,
+        try:
+            d=pytesseract.image_to_data(gray,lang=LANG_OCR,config=TESS_FAST_CFG,
                                     output_type=pytesseract.Output.DICT)
+        except pytesseract.TesseractError as e:
+            print(f'pytesseract error: {e}')
+            return []
         conf=np.asarray(d["conf"],int); keep=conf>=CONF_MIN_FAST
         if not keep.any(): return []
         lft=np.asarray(d["left"])[keep]/FAST_SCALE
@@ -167,6 +175,8 @@ class OCRWorker(QtCore.QThread):
 
 # ───────── GUI (priority list) ─────────
 class MainWindow(QtWidgets.QMainWindow):
+    glossReady = QtCore.Signal(str, list)          # word, glosses[:3]
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Live-OCR-Overlay")
@@ -186,6 +196,8 @@ class MainWindow(QtWidgets.QMainWindow):
         vbox.addWidget(self.list, 2)
 
         self.words: Dict[str, Dict] = {}
+        self.glosses: Dict[str, List[str]] = {}      # word → list[str]
+
         self.q: "queue.Queue[np.ndarray]" = queue.Queue(maxsize=NUM_WORKERS)
 
         self.grabber = ScreenGrabber(); self.grabber.frameCaptured.connect(self.on_frame)
@@ -197,10 +209,20 @@ class MainWindow(QtWidgets.QMainWindow):
             w.linesFound.connect(self.on_lines)
             w.start()
 
+        # async translation callback
+        self._cb = lambda fut, w=...: QtCore.QMetaObject.invokeMethod(
+            self, "_update_gloss", QtCore.Qt.QueuedConnection,
+            QtCore.Q_ARG(str, w), QtCore.Q_ARG(list, fut.result())
+        )
+
+
         self.last_roi_count = 0
         self.fc = 0; self.t = QtCore.QElapsedTimer(); self.t.start()
         QtCore.QTimer.singleShot(1000, self.update_fps)
         self.prune_timer = QtCore.QTimer(self); self.prune_timer.timeout.connect(self.prune); self.prune_timer.start(500)
+
+        self.glossReady.connect(self._update_gloss)
+
 
     # -------- slots --------
     @QtCore.Slot(np.ndarray)
@@ -220,9 +242,33 @@ class MainWindow(QtWidgets.QMainWindow):
         for word, bbox in lines:
             meta = self.words.setdefault(word, {"freq":0, "miss":0, "bbox":bbox})
             meta["freq"] += 1
-            meta["miss"] = 0
-            meta["bbox"] = bbox
+            meta["miss"]  = 0
+            meta["bbox"]  = bbox
+            self._submit_translate(word)         # ← schedule gloss lookup
         self.refresh_list()
+
+
+    @QtCore.Slot(str, list)
+    def _update_gloss(self, word: str, gloss_list: list):
+        if gloss_list:
+            self.glosses[word] = gloss_list[:3]
+            self.refresh_list()
+
+    def _submit_translate(self, word: str):
+        if word in self.glosses:
+            return                           # already cached
+
+        def _worker():
+            try:
+                data = translate.translate(word.lower())
+                return [s["definition"] for s in data.get("senses", [])][:3]
+            except Exception:
+                return []
+
+        def _done(fut):
+            self.glossReady.emit(word, fut.result())
+
+        POOL.submit(_worker).add_done_callback(_done)
 
     def prune(self):
         for w in list(self.words):
@@ -244,9 +290,25 @@ class MainWindow(QtWidgets.QMainWindow):
         scored.sort(reverse=True)
         self.list.clear()
         for _,word in scored:
-            it = QtWidgets.QListWidgetItem(word)
-            it.setFont(QtGui.QFont(FONT_FAMILY, FONT_SIZE_PT))
-            self.list.addItem(it)
+            # it = QtWidgets.QListWidgetItem(word)
+            # it.setFont(QtGui.QFont(FONT_FAMILY, FONT_SIZE_PT))
+            # self.list.addItem(it)
+            gloss = ", ".join(self.glosses.get(word, []))
+            if gloss:
+                html_txt = f"<b>{html.escape(word)}</b><br><i>{html.escape(gloss)}</i>"
+            else:
+                html_txt = f"<b>{html.escape(word)}</b>"
+
+            item = QtWidgets.QListWidgetItem()
+            lbl  = QtWidgets.QLabel(html_txt)
+            lbl.setTextFormat(QtCore.Qt.RichText)
+            lbl.setWordWrap(True)
+            lbl.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+
+            item.setSizeHint(lbl.sizeHint())
+            self.list.addItem(item)
+            self.list.setItemWidget(item, lbl)
+
             if DBG and scored:
                 logging.info("Top words: " +
                             ", ".join(f"{w}({s})" for s, w in scored[:8]))
