@@ -1,0 +1,10 @@
+PySide6
+numpy
+opencv-python
+pytesseract
+mss
+requests
+easyocr
+wiktionaryparser
+PyMultiDictionary
+word2word
