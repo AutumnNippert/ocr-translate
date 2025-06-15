@@ -19,9 +19,6 @@ from functools import lru_cache
 import concurrent.futures
 import string
 
-# debug("Importing Spacy...")
-# # import spacy
-# debug("Spacy imported.")
 debug("Libraries imported.")
 
 CACHE = shelve.open(os.path.expanduser("~/.g2e_cache.db"))
@@ -33,16 +30,6 @@ def clean(t: str) -> str:
 def normalize_word(word: str) -> str:
     # Remove punctuation and lowercase
     return word.strip(string.punctuation + "„“”’'\"").lower()
-
-def lemmatize(word: str) -> str:
-    return word
-    # Lazy-load the model
-    if not hasattr(lemmatize, "_nlp"):
-        t_spacy = time()
-        lemmatize._nlp = spacy.load("de_core_news_sm")
-        debug(f"spaCy model loaded in {time() - t_spacy:.2f}s")
-    doc = lemmatize._nlp(word)
-    return doc[0].lemma_
 
 # ----------------------------------------------------------- MyMemory (as before)
 def fetch_mymemory(word: str) -> List[Dict]:
@@ -102,7 +89,7 @@ def translate(word: str) -> Dict:
     debug(f"normalize_word: {norm_word} ({time() - t_norm:.3f}s)")
 
     t_lemma = time()
-    lemma_word = lemmatize(norm_word)
+    lemma_word = norm_word
     debug(f"lemmatize: {lemma_word} ({time() - t_lemma:.3f}s)")
 
     # Try cache for original, normalized, or lemmatized
