@@ -3,10 +3,26 @@
 """
 translate.py – free German→English multi-lexicon with cache
 """
+from time import time
+from datetime import datetime
+import sys, os
+sys.path.append(os.path.dirname(__file__))  # Ensure src/ is in sys.path
 
-import json, os, re, shelve, sys, requests, html
+from helpers.logging import debug
+
+debug("Starting translation module...")
+debug("Importing libraries...")
+
+import json, re, shelve, requests, html
 from typing import List, Dict
 from functools import lru_cache
+import concurrent.futures
+import string
+
+# debug("Importing Spacy...")
+# # import spacy
+# debug("Spacy imported.")
+debug("Libraries imported.")
 
 CACHE = shelve.open(os.path.expanduser("~/.g2e_cache.db"))
 
@@ -14,107 +30,19 @@ WORD_RE = re.compile(r"\w+", re.U)
 def clean(t: str) -> str:
     return re.sub(r"\s+", " ", html.unescape(t.strip()))
 
-# ----------------------------------------------------------- PyMultiDictionary
-# def fetch_pymulti(word: str) -> List[Dict]:
-#     """
-#     Use the free PyMultiDictionary wrapper around Linguee/Reverso.
-#     Returns up to 5 English glosses for a German word.
-#     """
-#     try:
-#         from PyMultiDictionary import MultiDictionary, DICT_MW          # pip install PyMultiDictionary
-#     except ImportError:
-#         print("Failed to work")
-#         return []
+def normalize_word(word: str) -> str:
+    # Remove punctuation and lowercase
+    return word.strip(string.punctuation + "„“”’'\"").lower()
 
-#     try:
-#         dic = MultiDictionary()
-#         results = dic.meaning('de', word, dictionary=DICT_MW)
-#         results = dic.meaning('de', word)
-#         print(results)
-#     except Exception:
-#         return []
-def fetch_pymulti(word: str) -> List[Dict]:
-    """
-    Free wrapper around Linguee/Reverso (pip install PyMultiDictionary).
-    Normalises all return shapes into our {pos, definition, examples, source}.
-    """
-    try:
-        from PyMultiDictionary import MultiDictionary, DICT_MW
-    except ImportError:
-        return []
-
-    try:
-        dic = MultiDictionary()
-        # MW = Merriam-Webster ; falls back to generic sources internally
-        raw = dic.meaning('de', word, dictionary=DICT_MW)
-    except Exception:
-        return []
-
-    senses: List[Dict] = []
-
-    # Case A – dict: {'Noun': ['street', 'road'], 'Verb': [...] }
-    if isinstance(raw, dict):
-        for pos, defs in raw.items():
-            for gloss in defs[:5]:
-                gloss = clean(gloss)
-                if gloss:
-                    senses.append({
-                        "pos": pos.lower(),
-                        "definition": gloss,
-                        "examples": [],
-                        "source": "pymultidict"
-                    })
-
-    # Case B – tuple/list format (older API or fallback):
-    # ([pos list], long_def, *rest)
-    elif isinstance(raw, (list, tuple)) and len(raw) >= 2:
-        pos_list, long_def = raw[:2]
-        gloss = clean(long_def.split(",")[0])
-        for pos in (pos_list if isinstance(pos_list, (list, tuple)) else [pos_list]):
-            if gloss:
-                senses.append({
-                    "pos": str(pos).lower(),
-                    "definition": gloss,
-                    "examples": [],
-                    "source": "pymultidict"
-                })
-    return senses[:5]
-    
-
-
-# ---------------------------------------------------------------- Wiktionary (pip package)
-def fetch_wiktionary(word: str) -> List[Dict]:
-    """
-    Use the wiktionaryparser package.
-    It downloads the *German* page and returns the English translations that
-    live under each sense's `translations -> english` list.
-    """
-    from wiktionaryparser import WiktionaryParser
-
-    parser = WiktionaryParser()
-
-    try:
-        page = parser.fetch(word, "german")          # list[dict]
-    except Exception:
-        return []
-
-    out: List[Dict] = []
-    for entry in page:
-        for definition in entry.get("definitions", []):
-            pos = definition.get("partOfSpeech", "")
-            # the bilingual table is keyed by language name
-            en_trans = definition.get("translations", {}).get("english", [])
-            for tr in en_trans:
-                gloss = clean(tr["text"])
-                if gloss:
-                    out.append({
-                        "pos": pos,
-                        "definition": gloss,
-                        "examples": [],
-                        "source": "wiktionary"
-                    })
-    return out
-
+def lemmatize(word: str) -> str:
+    return word
+    # Lazy-load the model
+    if not hasattr(lemmatize, "_nlp"):
+        t_spacy = time()
+        lemmatize._nlp = spacy.load("de_core_news_sm")
+        debug(f"spaCy model loaded in {time() - t_spacy:.2f}s")
+    doc = lemmatize._nlp(word)
+    return doc[0].lemma_
 
 # ----------------------------------------------------------- MyMemory (as before)
 def fetch_mymemory(word: str) -> List[Dict]:
@@ -152,28 +80,72 @@ def fetch_word2word(word: str) -> List[Dict]:
     except Exception:
         return []
 
+def fetch_libretranslate(word: str) -> List[Dict]:
+    try:
+        resp = requests.post(
+            "https://libretranslate.com/translate",
+            data={"q": word, "source": "de", "target": "en"},
+            timeout=4
+        )
+        trn = resp.json().get("translatedText", "")
+        if trn:
+            return [{"pos": "", "definition": trn, "examples": [], "source": "libretranslate"}]
+    except Exception:
+        pass
+    return []
+
 # ---------------------------------------------------------------- orchestrator
 def translate(word: str) -> Dict:
-    if word in CACHE:
-        return CACHE[word]
+    t_start = time()
+    t_norm = time()
+    norm_word = normalize_word(word)
+    debug(f"normalize_word: {norm_word} ({time() - t_norm:.3f}s)")
 
-    senses = ( 
-               fetch_pymulti(word) +
-               fetch_mymemory(word) +
-               fetch_wiktionary(word) +
-               fetch_word2word(word) )
+    t_lemma = time()
+    lemma_word = lemmatize(norm_word)
+    debug(f"lemmatize: {lemma_word} ({time() - t_lemma:.3f}s)")
 
-    # dedupe
-    seen, uniq = set(), []
-    for s in senses:
-        k = (s["definition"].lower(), s["pos"])
-        if k not in seen:
-            seen.add(k); uniq.append(s)
+    # Try cache for original, normalized, or lemmatized
+    t_cache = time()
+    for key in (word, norm_word, lemma_word):
+        if key in CACHE:
+            debug(f"cache hit for '{key}' ({time() - t_cache:.3f}s since cache check started)")
+            debug(f"total translate() time: {time() - t_start:.3f}s")
+            return CACHE[key]
+    debug(f"cache miss ({time() - t_cache:.3f}s)")
 
-    primary = uniq[0]["definition"] if uniq else "—"
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        def timed_fetch(name, func, arg):
+            start = time()
+            result = func(arg)
+            debug(f"{name} returned: {result}")
+            debug(f"Fetched {name} in {time() - start:.2f} seconds")
+            return result
+
+        t_fetch = time()
+        futures = [
+            executor.submit(timed_fetch, "MyMemory", fetch_mymemory, lemma_word),
+            executor.submit(timed_fetch, "Word2Word", fetch_word2word, lemma_word),
+            executor.submit(timed_fetch, "LibreTranslate", fetch_libretranslate, lemma_word),
+        ]
+        senses = []
+        for fut in futures:
+            try:
+                senses += fut.result(timeout=5)
+            except Exception:
+                pass
+        debug(f"All fetches done in {time() - t_fetch:.2f} seconds")
+
+
+    primary = senses[0]["definition"] if senses else "—"
     result = dict(word=word, primary=primary,
-                  senses=uniq[:12], sources=sorted({s["source"] for s in uniq}))
-    CACHE[word] = result
+                  senses=senses[:12], sources=sorted({s["source"] for s in senses}))
+    # Cache under all forms for fast future lookup
+    t_cache_write = time()
+    for key in (word, norm_word, lemma_word):
+        CACHE[key] = result
+    debug(f"Cache write done in {time() - t_cache_write:.3f}s")
+    debug(f"total translate() time: {time() - t_start:.3f}s")
     return result
 
 # ---------------------------------------------------------------- CLI

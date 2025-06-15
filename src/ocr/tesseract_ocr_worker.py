@@ -3,6 +3,7 @@ import pytesseract
 import numpy as np
 from time import time
 import cv2
+from helpers.logging import debug  # <-- Add this import
 
 pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"  # Adjust if needed
 
@@ -24,28 +25,34 @@ class OCRWorker(QtCore.QThread):
         self._run = True
 
     def run(self):
+        debug("[OCRWorker] Thread started")
         while self._run:
             try:
                 frame = self.q.get(timeout=0.05)
+                debug("[OCRWorker] Got frame from queue")
             except Exception:
                 continue
             self.process(frame)
             self.q.task_done()
 
     def stop(self):
+        debug("[OCRWorker] Stopping thread")
         self._run = False
         self.wait()
 
     def process(self, frame: np.ndarray):
         currtime = time()
+        debug("[OCRWorker] Starting OCR process")
         # Convert to grayscale for better OCR
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        debug("[OCRWorker] Converted frame to grayscale")
         # Optional: adaptive thresholding for better contrast
         # gray = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
         #                              cv2.THRESH_BINARY, 11, 2)
         data = pytesseract.image_to_data(
             gray, lang='deu', config="--oem 1 --psm 11", output_type=pytesseract.Output.DICT
         )
+        debug(f"[OCRWorker] pytesseract returned {len(data['level'])} boxes")
         words = []
         n_boxes = len(data['level'])
         for i in range(n_boxes):
@@ -63,7 +70,9 @@ class OCRWorker(QtCore.QThread):
                         words.append((word, (x0, y0, x1, y1)))
         words = list(set(words))
         words = [(word, bbox) for word, bbox in words if word]
+        debug(f"[OCRWorker] Found {len(words)} words after filtering")
         if words:
             self.linesFound.emit(words)
+            debug(f"[OCRWorker] Emitted {len(words)} words")
         currtime = time() - currtime
-        print(f"Tesseract OCR processed {len(words)} words in {currtime * 1000:.2f} ms")
+        debug(f"[OCRWorker] Tesseract OCR processed {len(words)} words in {currtime * 1000:.2f} ms")
