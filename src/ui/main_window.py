@@ -4,10 +4,6 @@ import queue
 from typing import Dict, List
 import numpy as np
 from translation.wiktionary_translate import translate
-# from translation import translate, wiktionary_translate
-from constants import (
-    WORD_MAX_NOT_FOUND_TIME
-)
 from ocr.screen_grabber import ScreenGrabber
 from ocr.paddle_ocr_worker import OCRWorker
 import concurrent.futures
@@ -142,13 +138,14 @@ class MainWindow(QtWidgets.QMainWindow):
         global dynamic_ocr_interval
         if now - self.last_ocr_time >= dynamic_ocr_interval:
             try:
+                print("[DEBUG] Pushing frame to OCR queue")
                 self.q.put_nowait(frame.copy())
             except queue.Full:
                 pass
             self.last_ocr_time = now
 
-        h, w = frame.shape[:2]
-        img = QtGui.QImage(frame.data, w, h, frame.strides[0], QtGui.QImage.Format_BGR888)
+        # h, w = frame.shape[:2]
+        # img = QtGui.QImage(frame.data, w, h, frame.strides[0], QtGui.QImage.Format_BGR888)
         # self.video.setPixmap(QtGui.QPixmap.fromImage(img).scaled(
         #     self.video.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
         self.fc += 1

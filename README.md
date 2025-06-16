@@ -31,12 +31,14 @@ python src/main.py
 ```
 
 # Other
+## General Required Packages
+* pipewire
+* gstreamer
+* gst-plugin-pipewire
+
+Currently only supports Python 3.11
+
 ## Wayland Support
 On gnome it should just work
 
 On KDE, it requires a virtual output when choosing screenshare option
-
-### REQUIRED PACKAGES:
-* pipewire
-* gstreamer
-* gst-plugin-pipewire
