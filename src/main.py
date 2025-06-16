@@ -1,7 +1,7 @@
 import sys
 import signal
 from PySide6 import QtWidgets
-from ui.overlay_window import OverlayWindow
+# from ui.overlay_window import OverlayWindow
 from ui.main_window import MainWindow
 
 def handle_sigint(*args):
@@ -27,16 +27,16 @@ if __name__ == "__main__":
         win = MainWindow()
         if show_window:
             win.show()
-        if show_overlay:
-            overlay = OverlayWindow(
-                win.get_top_words,
-                lambda: (
-                    win.screen_grabber.capture_x,
-                    win.screen_grabber.capture_y,
-                    win.screen_grabber.capture_w,
-                    win.screen_grabber.capture_h,
-                ),
-            )
-            overlay.show()
+        # if show_overlay:
+        #     overlay = OverlayWindow(
+        #         win.get_top_words,
+        #         lambda: (
+        #             win.screen_grabber.capture_x,
+        #             win.screen_grabber.capture_y,
+        #             win.screen_grabber.capture_w,
+        #             win.screen_grabber.capture_h,
+        #         ),
+        #     )
+        #     overlay.show()
 
     app.exec()
