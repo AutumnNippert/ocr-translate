@@ -14,7 +14,7 @@ import concurrent.futures
 import time
 import string 
 
-dynamic_ocr_interval = 1  # seconds
+dynamic_ocr_interval = 1
 
 import sys, os
 sys.path.append(os.path.dirname(__file__))  # Ensure src/ is in sys.path
@@ -36,10 +36,6 @@ class MainWindow(QtWidgets.QMainWindow):
         vbox = QtWidgets.QVBoxLayout(central)
         vbox.setContentsMargins(0, 0, 0, 0)
 
-        # self.video = QtWidgets.QLabel(alignment=QtCore.Qt.AlignCenter)
-        # self.video.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
-        # vbox.addWidget(self.video, 3)
-
         # Horizontal layout for list and details
         hlayout = QtWidgets.QHBoxLayout()
         vbox.addLayout(hlayout, 2)
@@ -52,6 +48,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.search_bar.setPlaceholderText("Search for a word...")
         left_vbox.addWidget(self.search_bar)
         self.search_bar.returnPressed.connect(self.translate_search_word)
+
+        # --- Mouse Follow Mode Toggle ---
+        self.mouse_follow_checkbox = QtWidgets.QCheckBox("Mouse Follow Mode")
+        self.mouse_follow_checkbox.setChecked(True)
+        self.mouse_follow_checkbox.stateChanged.connect(self.toggle_mouse_follow_mode)
+        left_vbox.addWidget(self.mouse_follow_checkbox)
+
+        self.mouse_follow_mode = True  # Default enabled
 
         self.list = QtWidgets.QListWidget()
         self.list.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
@@ -113,6 +117,7 @@ class MainWindow(QtWidgets.QMainWindow):
             for w in self.workers:
                 w.setParent(self)
                 w.linesFound.connect(self.on_lines)
+                w.process_time.connect(self.on_ocr_process_complete)
                 w.start()
 
         executor = ThreadPoolExecutor(max_workers=1)
@@ -122,9 +127,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.loading_label.hide()
             self.list.setEnabled(True)
             self.details.setEnabled(True)
-            global dynamic_ocr_interval
-            for w in self.workers:
-                dynamic_ocr_interval = w.get_process_time*2  # Use the interval from the first worker
 
         # Use QTimer to poll for completion
         def check_future():
@@ -137,6 +139,7 @@ class MainWindow(QtWidgets.QMainWindow):
     @QtCore.Slot(np.ndarray)
     def on_frame(self, frame):
         now = time.monotonic()
+        global dynamic_ocr_interval
         if now - self.last_ocr_time >= dynamic_ocr_interval:
             try:
                 self.q.put_nowait(frame.copy())
@@ -169,6 +172,16 @@ class MainWindow(QtWidgets.QMainWindow):
         t3 = time.time()
         # print(f"[DEBUG] on_lines: update words {1000*(t1-t0):.1f}ms, refresh_list {1000*(t2-t1):.1f}ms, submit_priority_translations {1000*(t3-t2):.1f}ms")
 
+    @QtCore.Slot(float)
+    def on_ocr_process_complete(self, time):
+        global dynamic_ocr_interval
+        print("[SUPERDEBUGTHISISADEBUGMESSAGEHI]Setting dynamic OCR interval to", time * 5)
+        dynamic_ocr_interval = time
+
+    def toggle_mouse_follow_mode(self, state):
+        self.mouse_follow_mode = bool(state)
+        self.refresh_list()
+
     def refresh_list(self):
         t0 = time.time()
         # Save scroll position and selected word
@@ -182,22 +195,20 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Compute mouse position in capture area coordinates
         mouse_video_pos = None
-        global_mouse_pos = QtGui.QCursor.pos()
-        mx, my = global_mouse_pos.x(), global_mouse_pos.y()
-        # debug(f"[DEBUG] Mouse position: ({mx}, {my})", debug_override=True)
+        if self.mouse_follow_mode:
+            global_mouse_pos = QtGui.QCursor.pos()
+            mx, my = global_mouse_pos.x(), global_mouse_pos.y()
+            capture_x = self.screen_grabber.capture_x
+            capture_y = self.screen_grabber.capture_y
+            capture_w = self.screen_grabber.capture_w
+            capture_h = self.screen_grabber.capture_h
 
-        # Use the monitor/capture area geometry
-        capture_x = self.screen_grabber.capture_x
-        capture_y = self.screen_grabber.capture_y
-        capture_w = self.screen_grabber.capture_w
-        capture_h = self.screen_grabber.capture_h
-
-        if (capture_x <= mx < capture_x + capture_w) and (capture_y <= my < capture_y + capture_h):
-            mouse_video_pos = (mx - capture_x, my - capture_y)
-            # Mouse is over the captured monitor
+            if (capture_x <= mx < capture_x + capture_w) and (capture_y <= my < capture_y + capture_h):
+                mouse_video_pos = (mx - capture_x, my - capture_y)
+            else:
+                mouse_video_pos = None
         else:
             mouse_video_pos = None
-            # Mouse is not over the captured monitor
 
         scored = []
         for word, meta in self.words.items():
@@ -259,7 +270,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def update_fps(self):
         fps = self.fc / max(1, self.t.elapsed() / 1000)
         self.setWindowTitle(
-            f"Live-OCR-Overlay  |  {fps:.0f} FPS  |  {len(self.words)} words"
+            f"Live-OCR-Overlay  |  {fps:.0f} FPS  |  {len(self.words)} words  |  {dynamic_ocr_interval}s last process"
         )
         self.fc = 0
         self.t.restart()
@@ -268,7 +279,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def prune(self):
         now = time.monotonic()
         for w in list(self.words):
-            if now - self.words[w]["last_seen"] >= WORD_MAX_NOT_FOUND_TIME:
+            if now - self.words[w]["last_seen"] >= dynamic_ocr_interval*2:
                 del self.words[w]
         self.refresh_list()
 
@@ -321,16 +332,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.update_details()
 
     def get_top_words(self, n=3):
-        # Get mouse position relative to capture area
-        global_mouse_pos = QtGui.QCursor.pos()
-        mx, my = global_mouse_pos.x(), global_mouse_pos.y()
-        capture_x = self.screen_grabber.capture_x
-        capture_y = self.screen_grabber.capture_y
-        capture_w = self.screen_grabber.capture_w
-        capture_h = self.screen_grabber.capture_h
+        if self.mouse_follow_mode:
+            global_mouse_pos = QtGui.QCursor.pos()
+            mx, my = global_mouse_pos.x(), global_mouse_pos.y()
+            capture_x = self.screen_grabber.capture_x
+            capture_y = self.screen_grabber.capture_y
+            capture_w = self.screen_grabber.capture_w
+            capture_h = self.screen_grabber.capture_h
 
-        if (capture_x <= mx < capture_x + capture_w) and (capture_y <= my < capture_y + capture_h):
-            mouse_video_pos = (mx - capture_x, my - capture_y)
+            if (capture_x <= mx < capture_x + capture_w) and (capture_y <= my < capture_y + capture_h):
+                mouse_video_pos = (mx - capture_x, my - capture_y)
+            else:
+                mouse_video_pos = None
         else:
             mouse_video_pos = None
 
@@ -355,16 +368,18 @@ class MainWindow(QtWidgets.QMainWindow):
         return result
 
     def submit_priority_translations(self, n=5):
-        # Get mouse position relative to capture area
-        global_mouse_pos = QtGui.QCursor.pos()
-        mx, my = global_mouse_pos.x(), global_mouse_pos.y()
-        capture_x = self.screen_grabber.capture_x
-        capture_y = self.screen_grabber.capture_y
-        capture_w = self.screen_grabber.capture_w
-        capture_h = self.screen_grabber.capture_h
+        if self.mouse_follow_mode:
+            global_mouse_pos = QtGui.QCursor.pos()
+            mx, my = global_mouse_pos.x(), global_mouse_pos.y()
+            capture_x = self.screen_grabber.capture_x
+            capture_y = self.screen_grabber.capture_y
+            capture_w = self.screen_grabber.capture_w
+            capture_h = self.screen_grabber.capture_h
 
-        if (capture_x <= mx < capture_x + capture_w) and (capture_y <= my < capture_y + capture_h):
-            mouse_video_pos = (mx - capture_x, my - capture_y)
+            if (capture_x <= mx < capture_x + capture_w) and (capture_y <= my < capture_y + capture_h):
+                mouse_video_pos = (mx - capture_x, my - capture_y)
+            else:
+                mouse_video_pos = None
         else:
             mouse_video_pos = None
 

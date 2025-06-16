@@ -2,8 +2,10 @@ from PySide6 import QtCore
 import numpy as np
 from time import time
 from paddleocr import PaddleOCR
-import cv2  
 from PIL import Image
+
+import os
+os.nice(10)  # lower priority
 
 # Initialize PaddleOCR (lighter config for real-time)
 ocr = PaddleOCR(
@@ -22,12 +24,12 @@ def clean_text(text: str) -> list[str]:
 
 class OCRWorker(QtCore.QThread):
     linesFound = QtCore.Signal(list)
+    process_time = QtCore.Signal(float)
 
     def __init__(self, q):
         super().__init__()
         self.q = q
         self._run = True
-        self.get_process_time = 0.0
 
     def run(self):
         while self._run:
@@ -63,8 +65,6 @@ class OCRWorker(QtCore.QThread):
         sentence_sizes = []
         bounding_boxes = []
 
-        words = [] # form: [(word, (x0, y0, x1, y1))]
-
         #get bounding boxes first
         for box in results['rec_boxes']:
             bounding_boxes.append((box[0], box[1], box[2], box[3]))
@@ -98,5 +98,5 @@ class OCRWorker(QtCore.QThread):
         if word_bounding_boxes:
             self.linesFound.emit(word_bounding_boxes)
         currtime = time() - currtime
-        self.get_process_time += currtime
+        self.process_time.emit(currtime)
         print(f"OCR processed {len(word_bounding_boxes)} words in {currtime * 1000:.2f} ms")

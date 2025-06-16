@@ -1,9 +1,5 @@
 import os
 import time
-import subprocess
-import io
-import tempfile
-from PIL import Image
 import numpy as np
 from PySide6 import QtCore
 from mss import mss

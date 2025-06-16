@@ -4,7 +4,6 @@
 translate.py – free German→English multi-lexicon with cache
 """
 from time import time
-from datetime import datetime
 import sys, os
 sys.path.append(os.path.dirname(__file__))  # Ensure src/ is in sys.path
 
