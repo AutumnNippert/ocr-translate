@@ -3,6 +3,10 @@ import signal
 from PySide6 import QtWidgets
 # from ui.overlay_window import OverlayWindow
 from ui.main_window import MainWindow
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 def handle_sigint(*args):
     QtWidgets.QApplication.quit()

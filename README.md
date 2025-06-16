@@ -31,6 +31,11 @@ python src/main.py
 ```
 
 # Other
+## Google Translation API
+Requires a `.env` file with the following content:
+
+`GOOGLE_APPLICATION_CREDENTIALS="/path/to/key.json"`
+
 ## General Required Packages
 * pipewire
 * gstreamer

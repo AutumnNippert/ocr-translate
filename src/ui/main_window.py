@@ -3,7 +3,7 @@ import html
 import queue
 from typing import Dict, List
 import numpy as np
-from translation.wiktionary_translate import translate
+from translation.google_translate import translate
 from ocr.screen_grabber import ScreenGrabber
 from ocr.paddle_ocr_worker import OCRWorker
 import concurrent.futures
@@ -24,7 +24,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Live-OCR-Overlay")
+        self.setWindowTitle("OCR-Translate")
         self.resize(1000, 700)
 
         central = QtWidgets.QWidget()
@@ -47,7 +47,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # --- Mouse Follow Mode Toggle ---
         self.mouse_follow_checkbox = QtWidgets.QCheckBox("Mouse Follow Mode")
-        self.mouse_follow_checkbox.setChecked(True)
+        self.mouse_follow_checkbox.setChecked(False)
         self.mouse_follow_checkbox.stateChanged.connect(self.toggle_mouse_follow_mode)
         left_vbox.addWidget(self.mouse_follow_checkbox)
 
@@ -172,8 +172,8 @@ class MainWindow(QtWidgets.QMainWindow):
     @QtCore.Slot(float)
     def on_ocr_process_complete(self, time):
         global dynamic_ocr_interval
-        print("[SUPERDEBUGTHISISADEBUGMESSAGEHI]Setting dynamic OCR interval to", time * 5)
-        dynamic_ocr_interval = time
+        print("[SUPERDEBUGTHISISADEBUGMESSAGEHI]Setting dynamic OCR interval to", time)
+        dynamic_ocr_interval = time*10
 
     def toggle_mouse_follow_mode(self, state):
         self.mouse_follow_mode = bool(state)
@@ -226,17 +226,15 @@ class MainWindow(QtWidgets.QMainWindow):
         scored.sort()
         t1 = time.time()
         self.list.clear()
-        MAX_LIST = 20  # Only show top 20 words
+        MAX_LIST = 50  # Only show top 20 words
         for _, _, word in scored[:MAX_LIST]:
             gloss_data = self.glosses.get(word, {})
             # --- Use ['definitions'] for the list ---
             definitions = gloss_data.get("definitions", {})
             first_def = ""
             # Get the first available definition from any part of speech
-            for pos_defs in definitions.values():
-                if isinstance(pos_defs, list) and pos_defs:
-                    first_def = pos_defs[0].get("definition", "")
-                    break
+            for pos, defs in definitions.items():
+                first_def = defs
             if first_def:
                 html_txt = f"<b>{html.escape(word)}</b><br><i>{html.escape(first_def)}</i>"
             else:
@@ -267,7 +265,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def update_fps(self):
         fps = self.fc / max(1, self.t.elapsed() / 1000)
         self.setWindowTitle(
-            f"Live-OCR-Overlay  |  {fps:.0f} FPS  |  {len(self.words)} words  |  {dynamic_ocr_interval}s last process"
+            f"Live-OCR-Overlay  |  {fps:.0f} FPS  |  {len(self.words)} words  |  {dynamic_ocr_interval/2:.2f}s last process"
         )
         self.fc = 0
         self.t.restart()
@@ -414,7 +412,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         def _worker():
             try:
-                return translate(word)
+                res = translate(word)
+                print(f"[DEBUG] Translated '{word}' to {res}")
+                return res
             except Exception:
                 return None
 
