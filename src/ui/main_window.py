@@ -6,13 +6,15 @@ import numpy as np
 from translation.wiktionary_translate import translate
 # from translation import translate, wiktionary_translate
 from constants import (
-    NUM_WORKERS, WORD_MAX_NOT_FOUND_TIME, OCR_INTERVAL
+    WORD_MAX_NOT_FOUND_TIME
 )
 from ocr.screen_grabber import ScreenGrabber
-from ocr.tesseract_ocr_worker import OCRWorker
+from ocr.paddle_ocr_worker import OCRWorker
 import concurrent.futures
 import time
 import string 
+
+dynamic_ocr_interval = 1  # seconds
 
 import sys, os
 sys.path.append(os.path.dirname(__file__))  # Ensure src/ is in sys.path
@@ -34,9 +36,9 @@ class MainWindow(QtWidgets.QMainWindow):
         vbox = QtWidgets.QVBoxLayout(central)
         vbox.setContentsMargins(0, 0, 0, 0)
 
-        self.video = QtWidgets.QLabel(alignment=QtCore.Qt.AlignCenter)
-        self.video.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
-        vbox.addWidget(self.video, 3)
+        # self.video = QtWidgets.QLabel(alignment=QtCore.Qt.AlignCenter)
+        # self.video.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        # vbox.addWidget(self.video, 3)
 
         # Horizontal layout for list and details
         hlayout = QtWidgets.QHBoxLayout()
@@ -65,7 +67,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.words: Dict[str, Dict] = {}
         self.glosses: Dict[str, List[str]] = {}
 
-        self.q: "queue.Queue[np.ndarray]" = queue.Queue(maxsize=NUM_WORKERS)
+        self.q: "queue.Queue[np.ndarray]" = queue.Queue(maxsize=2)
 
         self.last_roi_count = 0
         self.fc = 0
@@ -107,7 +109,7 @@ class MainWindow(QtWidgets.QMainWindow):
         from concurrent.futures import ThreadPoolExecutor
 
         def worker_init():
-            self.workers = [OCRWorker(self.q) for _ in range(NUM_WORKERS)]
+            self.workers = [OCRWorker(self.q) for _ in range(1)]
             for w in self.workers:
                 w.setParent(self)
                 w.linesFound.connect(self.on_lines)
@@ -120,6 +122,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.loading_label.hide()
             self.list.setEnabled(True)
             self.details.setEnabled(True)
+            global dynamic_ocr_interval
+            for w in self.workers:
+                dynamic_ocr_interval = w.get_process_time*2  # Use the interval from the first worker
 
         # Use QTimer to poll for completion
         def check_future():
@@ -132,7 +137,7 @@ class MainWindow(QtWidgets.QMainWindow):
     @QtCore.Slot(np.ndarray)
     def on_frame(self, frame):
         now = time.monotonic()
-        if now - self.last_ocr_time >= OCR_INTERVAL:
+        if now - self.last_ocr_time >= dynamic_ocr_interval:
             try:
                 self.q.put_nowait(frame.copy())
             except queue.Full:
@@ -141,8 +146,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         h, w = frame.shape[:2]
         img = QtGui.QImage(frame.data, w, h, frame.strides[0], QtGui.QImage.Format_BGR888)
-        self.video.setPixmap(QtGui.QPixmap.fromImage(img).scaled(
-            self.video.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
+        # self.video.setPixmap(QtGui.QPixmap.fromImage(img).scaled(
+        #     self.video.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
         self.fc += 1
 
     @QtCore.Slot(list)
@@ -163,31 +168,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.submit_priority_translations(n=5)
         t3 = time.time()
         # print(f"[DEBUG] on_lines: update words {1000*(t1-t0):.1f}ms, refresh_list {1000*(t2-t1):.1f}ms, submit_priority_translations {1000*(t3-t2):.1f}ms")
-
-    def _submit_translate(self, word: str):
-        t0 = time.time()
-        if word in self.glosses:
-            return
-
-        def _worker():
-            try:
-                return translate(word)
-            except Exception:
-                return None
-
-        def _done(fut):
-            self.glossReady.emit(word, fut.result())
-            t1 = time.time()
-            # print(f"[DEBUG] Translation for '{word}' took {1000*(t1-t0):.1f}ms")
-
-        POOL.submit(_worker).add_done_callback(_done)
-
-    @QtCore.Slot(str, dict)
-    def _update_gloss(self, word: str, translation_data: dict):
-        if translation_data:
-            self.glosses[word] = translation_data
-            self.refresh_list()
-            self.update_details()
 
     def refresh_list(self):
         t0 = time.time()
@@ -241,10 +221,16 @@ class MainWindow(QtWidgets.QMainWindow):
         MAX_LIST = 20  # Only show top 20 words
         for _, _, word in scored[:MAX_LIST]:
             gloss_data = self.glosses.get(word, {})
-            glosses = [s["definition"] for s in gloss_data.get("senses", [])][:3] if gloss_data else []
-            primary_defs = [s.get("primary") or s.get("definition") for s in gloss_data.get("senses", []) if s.get("primary") or s.get("definition")]
-            if primary_defs:
-                html_txt = f"<b>{html.escape(word)}</b><br><i>{html.escape(primary_defs[0])}</i>"
+            # --- Use ['definitions'] for the list ---
+            definitions = gloss_data.get("definitions", {})
+            first_def = ""
+            # Get the first available definition from any part of speech
+            for pos_defs in definitions.values():
+                if isinstance(pos_defs, list) and pos_defs:
+                    first_def = pos_defs[0].get("definition", "")
+                    break
+            if first_def:
+                html_txt = f"<b>{html.escape(word)}</b><br><i>{html.escape(first_def)}</i>"
             else:
                 html_txt = f"<b>{html.escape(word)}</b>"
 
@@ -314,10 +300,12 @@ class MainWindow(QtWidgets.QMainWindow):
         word = html.unescape(selected_lbl.text().split("<br>")[0].replace("<b>", "").replace("</b>", ""))
         gloss_data = self.glosses.get(word, None)
         details_html = f"<h2>{html.escape(word)}</h2>"
+        # --- Render the 'html' field for details ---
         if gloss_data is None:
             details_html += "<i>Translating...</i>"
         else:
-            details_html += gloss_data
+            html_content = gloss_data.get("html", "")
+            details_html += html_content
         self.details.setHtml(details_html)
         # Do not scroll the selected word to the top!
 
@@ -393,7 +381,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 dist = float('inf')
             scored.append((dist, word))
         scored.sort()
+        print(f"[DEBUG] Submitting priority translations for {len(scored)} words")
+        # prpint the whole list of words
+        print(f"[DEBUG] Top {n} words to translate:")
+        for i, (dist, word) in enumerate(scored[:n]):
+            print(f"[DEBUG] {i+1}. '{word}' at distance {dist:.1f}")
         for _, word in scored[:n]:
+            print(f"[DEBUG] Submitting priority translation for '{word}'")
             self._submit_translate(word)
 
     # --- Add this slot to safely update details from any thread ---
@@ -401,17 +395,40 @@ class MainWindow(QtWidgets.QMainWindow):
     def set_details_html(self, html_str):
         self.details.setHtml(html_str)
 
+    def _submit_translate(self, word: str):
+        t0 = time.time()
+        if word in self.glosses:
+            return
+
+        def _worker():
+            try:
+                return translate(word)
+            except Exception:
+                return None
+
+        def _done(fut):
+            self.glossReady.emit(word, fut.result())
+            t1 = time.time()
+            print(f"[DEBUG] Translation for '{word}' took {1000*(t1-t0):.1f}ms")
+
+        POOL.submit(_worker).add_done_callback(_done)
+
+    @QtCore.Slot(str, dict)
+    def _update_gloss(self, word: str, translation_data: dict):
+        if translation_data:
+            self.glosses[word] = translation_data
+            self.refresh_list()
+            self.update_details()
+
     def translate_search_word(self):
         word = self.search_bar.text().strip()
         if not word:
-            # If search bar is cleared, return to OCR mode
             self.refresh_list()
             return
         self.list.clearSelection()
         def _worker():
             try:
-                html = translate(word)
-                return html
+                return translate(word)
             except Exception:
                 return None
 
@@ -421,8 +438,8 @@ class MainWindow(QtWidgets.QMainWindow):
             if not result:
                 details_html += "<i>No translation found.</i>"
             else:
-                details_html += result
-            # Update details in the main thread
+                html_content = result.get("html", "")
+                details_html += html_content
             QtCore.QMetaObject.invokeMethod(self, "set_details_html", QtCore.Qt.QueuedConnection, QtCore.Q_ARG(str, details_html))
 
         POOL.submit(_worker).add_done_callback(_done)

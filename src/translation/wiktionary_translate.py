@@ -10,7 +10,7 @@ PARTS_OF_SPEECH = [
     "preposition", "postposition", "conjunction", "interjection", 
     "particle", "numeral", "symbol", "suffix", "prefix", "infix",
     "circumfix", "proper noun", "phrase", "idiom", "proverb", 
-    "letter", "punctuation", "contraction", "expression"
+    "letter", "punctuation", "contraction", "expression", "article",
 ]
 
 CACHE_LOCATION = "./wiki_cache"
@@ -42,7 +42,7 @@ def get_word(word: str, language: str = "German") -> dict:
     url = f"https://en.wiktionary.org/api/rest_v1/page/html/{word}"
     response = requests.get(url)
     if response.status_code != 200:
-        return ""
+        return "No definitions found for word: {word}"
     
     soup = BeautifulSoup(response.text, "html.parser")
     # get list of all sections
@@ -54,18 +54,21 @@ def get_word(word: str, language: str = "German") -> dict:
             break
     
     if not german_section:
-        print(f"No section found for language: {language}")
+        # create a cache file with the word so that we don't just fetch the fail again
+        with open(cache_filename, "w", encoding="utf-8") as cache_file:
+            cache_file.write(f"<section><h2>{language}</h2><p>No section found for word: {word}</p></section>")
+        print(f"No section found of word {word} for language: {language}")
         return None
     # get all subsections of the german section
     data = {}
-    subsections = german_section.find_all("section")
+    subsections = german_section.find_all("section", recursive=False)
     for subsection in subsections:
         header = subsection.find("h3")
         if header:
             contents = header.contents[0]
             # Only clean headers that are not part of the parts of speech
             if str(contents).lower() not in PARTS_OF_SPEECH:
-                print(f'Cleaning of header: {header.text.strip()}')
+                # print(f'Cleaning of header: {header.text.strip()}')
                 data[header.text.strip()] = get_all_text(subsection)
                 continue
             siblings = []
@@ -109,7 +112,6 @@ def get_word(word: str, language: str = "German") -> dict:
                             }
                             word_defs.append(word_def)
                 definitions[key] = word_defs
-                print(f'Cleaning of part of speech: {key}')
                 data[key] = get_all_text(sibling) # clean up the PoS part of the text
     if not definitions:
         print(f"No definitions found for word: {word}")
@@ -124,18 +126,26 @@ def get_word(word: str, language: str = "German") -> dict:
     return data
 
 def translate(word: str) -> str:
-    lemma = tagger_de.analyze(word)[0]
+    analysis = tagger_de.analyze(word)
+    print(f"Analysis for word '{word}': {analysis}")
+    lemma = analysis[0]
+    pos = analysis[1]
+    if str(pos).startswith('N'):
+        lemma = lemma.capitalize()
+    else:
+        lemma = lemma.lower()
+    print(f"Lemmatized word: {lemma} (POS: {pos})")
     return get_word(lemma, 'German')
 
 if __name__ == "__main__":
-    word = "Dummkopf"  # Example word to translate
+    word = "Der"  # Example word to translate
     translation = translate(word)
     # print(translation)
     if translation:
         print(f"Translation for '{word}':")
         print(translation['definitions'])
 
-        # remve the html key from the translation
+        # remove the html key from the translation
         translation.pop('html', None)
 
         print(translation)
