@@ -3,5 +3,6 @@ __pycache__/
 wiki_cache/
 old/
 .wordcache
+.wordcache.db
 *.json
 .env

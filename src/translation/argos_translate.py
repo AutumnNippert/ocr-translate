@@ -1,11 +1,22 @@
+
+import time
+import argostranslate.package, argostranslate.translate
+
+print("Initializing ArgosTranslate...")
+start = time.time()
+# Download and install languages
+argostranslate.package.update_package_index()
+packages = argostranslate.package.get_available_packages()
+[package] = [p for p in packages if p.from_code == "de" and p.to_code == "en"]
+argostranslate.package.install_from_path(package.download())
+end = time.time()
+print(f"ArgosTranslate packages updated in {end - start:.2f} seconds")
+
 import dbm
 import json
 import os
-import time
-from google.cloud import translate_v2 as gtranslate_v2
 from HanTa import HanoverTagger as ht
 
-client = gtranslate_v2.Client()
 tagger_de = ht.HanoverTagger('morphmodel_ger.pgz')
 
 CACHE_DB_FILE = '.wordcache.db'
@@ -48,6 +59,8 @@ def translate(word: str) -> dict:
     if cached:
         print(f"Cache hit for word '{word}'")
         return cached
+    else:
+        print(f"Cache miss for word '{word}'")
 
     if word.isdigit():
         print(f"Word '{word}' is a number, returning as is.")
@@ -59,14 +72,14 @@ def translate(word: str) -> dict:
         cache_set(word, result_dict)
         return result_dict
 
-    result = client.translate(word, target_language="en")
+    result = argostranslate.translate.translate(word, "de", "en")
     print(result)
     result_dict = {
         'word': word,
         'definitions': {
-            pos[1]: pos[0] + " -> " + result["translatedText"]
+            pos[1]: pos[0] + " -> " + result
         },
-        'html': f'<span class="translation">{result["translatedText"]}</span>'
+        'html': f'<span class="translation">{result}</span>'
     }
 
     cache_set(word, result_dict)
