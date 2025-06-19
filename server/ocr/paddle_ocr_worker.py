@@ -1,9 +1,6 @@
-from PySide6 import QtCore
 import numpy as np
 from time import time
 from paddleocr import PaddleOCR
-from PIL import Image
-
 import os
 os.nice(10)  # lower priority
 

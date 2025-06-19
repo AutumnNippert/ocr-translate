@@ -51,25 +51,22 @@ class ScreenGrabber(QtCore.QThread):
     def run(self):
         if self.is_wayland:
             debug("Wayland mode detected, initializing portal session...", debug_override=DEBUG_OVERRIDE)
-            # 1. Connect to the session bus
             bus = dbus.SessionBus()
             portal = bus.get_object('org.freedesktop.portal.Desktop', '/org/freedesktop/portal/desktop')
             iface = dbus.Interface(portal, 'org.freedesktop.portal.ScreenCast')
 
-            # 2. Create a session (wait for Response signal)
+            # --- 1. Create session ---
             token = "screencap" + str(int(time.time()))
             options = {'session_handle_token': token}
             session_path = None
             response = {}
 
-            main_loop = GLib.MainLoop()
             def handle_response(response_id, results, **kwargs):
                 debug(f"[Wayland] handle_response called: response_id={response_id}, results={results}", debug_override=DEBUG_OVERRIDE)
                 nonlocal session_path, response
                 if response_id == 0 and ('session_handle' in results or 'handle' in results):
                     session_path = results.get('session_handle') or results.get('handle')
                     response = results
-                    main_loop.quit()
 
             bus.add_signal_receiver(
                 handle_response,
@@ -79,22 +76,26 @@ class ScreenGrabber(QtCore.QThread):
             )
             debug("[Wayland] Creating session...", debug_override=DEBUG_OVERRIDE)
             iface.CreateSession(options, dbus_interface='org.freedesktop.portal.ScreenCast')
-            main_loop.run()
+
+            # Wait for session_path with timeout
             for _ in range(100):
                 if session_path:
                     break
                 time.sleep(0.05)
+            bus.remove_signal_receiver(handle_response)
             if not session_path:
-                debug("[Wayland] Failed to create portal session.", debug_override=DEBUG_OVERRIDE)
+                debug("[Wayland] Failed to create portal session (timeout).", debug_override=DEBUG_OVERRIDE)
                 return
 
-            # 3. Select sources (wait for Response)
+            # --- 2. Select sources ---
             select_options = {'types': dbus.UInt32(1)}
             select_done = False
+
             def handle_select_response(response_id, results, **kwargs):
                 debug(f"[Wayland] handle_select_response: response_id={response_id}, results={results}", debug_override=DEBUG_OVERRIDE)
                 nonlocal select_done
                 select_done = (response_id == 0)
+
             bus.add_signal_receiver(
                 handle_select_response,
                 signal_name="Response",
@@ -102,16 +103,17 @@ class ScreenGrabber(QtCore.QThread):
                 path_keyword="path"
             )
             debug("[Wayland] Selecting sources...", debug_override=DEBUG_OVERRIDE)
-            req_path = iface.SelectSources(session_path, select_options, dbus_interface='org.freedesktop.portal.ScreenCast')
+            iface.SelectSources(session_path, select_options, dbus_interface='org.freedesktop.portal.ScreenCast')
             for _ in range(100):
                 if select_done:
                     break
                 time.sleep(0.05)
+            bus.remove_signal_receiver(handle_select_response)
             if not select_done:
-                debug("[Wayland] Failed to select sources.", debug_override=DEBUG_OVERRIDE)
+                debug("[Wayland] Failed to select sources (timeout).", debug_override=DEBUG_OVERRIDE)
                 return
 
-            # 4. Start the session (wait for Response)
+            # --- 3. Start session ---
             start_done = False
             start_results = {}
 
@@ -130,36 +132,32 @@ class ScreenGrabber(QtCore.QThread):
             )
             app_id = "screen-cap-translate"
             debug(f"[Wayland] session_path before Start: {session_path!r}", debug_override=DEBUG_OVERRIDE)
-            if not session_path or not isinstance(session_path, str):
-                debug("[Wayland] Invalid session_path for Start!", debug_override=DEBUG_OVERRIDE)
-                return
-            debug("[Wayland] Starting session...", debug_override=DEBUG_OVERRIDE)
             iface.Start(session_path, app_id, {}, dbus_interface='org.freedesktop.portal.ScreenCast')
             for _ in range(100):
                 if start_done:
                     break
                 time.sleep(0.05)
+            bus.remove_signal_receiver(handle_start_response)
             if not start_done:
-                debug("[Wayland] Failed to start session.", debug_override=DEBUG_OVERRIDE)
+                debug("[Wayland] Failed to start session (timeout).", debug_override=DEBUG_OVERRIDE)
                 return
 
-            # 5. Get PipeWire node ID from start_results
+            # --- 4. Get PipeWire node ID ---
             pw_streams = start_results.get('streams', [])
             if not pw_streams:
                 debug("[Wayland] No streams returned from portal.", debug_override=DEBUG_OVERRIDE)
                 return
 
             # Use self.id to select the correct stream if multiple were returned
-            if self.id < len(pw_streams):
+            try:
                 node_id, props = pw_streams[self.id]
-            else:
-                node_id, props = pw_streams[0]  # fallback to first
+            except Exception:
+                node_id, props = pw_streams[0]
 
             size = props.get('size')
             position = props.get('position')
             debug(f"[Wayland] PipeWire node_id: {node_id}, size: {size}, position: {position}", debug_override=DEBUG_OVERRIDE)
 
-            # Prefer portal's size/position, fallback to mss geometry from __init__
             if size:
                 self.capture_w, self.capture_h = int(size[0]), int(size[1])
             if position:
@@ -173,7 +171,7 @@ class ScreenGrabber(QtCore.QThread):
 
             debug(f"[Wayland] Capture area set to x={self.capture_x}, y={self.capture_y}, w={self.capture_w}, h={self.capture_h}", debug_override=DEBUG_OVERRIDE)
 
-            # Initialize GStreamer
+            # --- 5. GStreamer pipeline with retry ---
             Gst.init(None)
             debug("[Wayland] Initializing GStreamer pipeline...", debug_override=DEBUG_OVERRIDE)
             pipeline = Gst.parse_launch(
@@ -185,6 +183,7 @@ class ScreenGrabber(QtCore.QThread):
             pipeline.set_state(Gst.State.PLAYING)
 
             prev = 0
+            no_frame_count = 0
             while self._run:
                 if time.time() - prev < 1 / CAPTURE_FPS_CAP:
                     time.sleep(.002)
@@ -200,9 +199,17 @@ class ScreenGrabber(QtCore.QThread):
                     )
                     debug(f"[Wayland] Frame captured at {time.time():.3f}", debug_override=False)
                     self.frameCaptured.emit(arr.copy())
+                    no_frame_count = 0
                 else:
+                    no_frame_count += 1
                     debug("[Wayland] No frame received from PipeWire.", debug_override=False)
                     time.sleep(0.1)
+                    # If no frames for 2 seconds, try to restart pipeline
+                    if no_frame_count > 20:
+                        debug("[Wayland] Restarting GStreamer pipeline due to no frames.", debug_override=True)
+                        pipeline.set_state(Gst.State.NULL)
+                        pipeline.set_state(Gst.State.PLAYING)
+                        no_frame_count = 0
             pipeline.set_state(Gst.State.NULL)
         else:
             with mss() as s:

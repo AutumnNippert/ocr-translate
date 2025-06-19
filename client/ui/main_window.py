@@ -1,14 +1,11 @@
 from PySide6 import QtCore, QtGui, QtWidgets
+from PySide6.QtCore import QMetaObject, Qt
 import html
-import queue
 from typing import Dict, List
 import numpy as np
 from screen_capture.screen_grabber import ScreenGrabber
 import concurrent.futures
 import time
-import string 
-
-dynamic_ocr_interval = 1
 
 import sys, os
 sys.path.append(os.path.dirname(__file__))  # Ensure src/ is in sys.path
@@ -17,6 +14,8 @@ from helpers.logging import debug
 
 POOL = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 server = "http://localhost:8000"  # Replace with your server URL
+
+dynamic_ocr_interval = 5.0  # seconds
 
 def request_server_ocr(frame: np.ndarray) -> concurrent.futures.Future:
     """
@@ -28,7 +27,7 @@ def request_server_ocr(frame: np.ndarray) -> concurrent.futures.Future:
     # sending to this endpoint
     """
     @app.post("/analyze/image")
-async def analyze_image_base64(payload: ImageRequest):
+    async def analyze_image_base64(payload: ImageRequest):
     """
     # Convert the frame to PIL Image
     img = Image.fromarray(frame)
@@ -64,13 +63,35 @@ def request_server_translate(text: str) -> concurrent.futures.Future:
     # Send the request
     future = POOL.submit(
         requests.post,
-        f"{server}/translate/text",
+        f"{server}/translate",
+        json=payload
+    )
+    return future
+
+def request_server_translate_batch(text_list: list[str]) -> concurrent.futures.Future:
+    """
+    Submit a translation request to the server
+    """
+    import requests
+    # Prepare the payload
+    payload = []
+    for text in text_list:
+        word = {
+            "text": text
+        }
+        payload.append(word)
+
+    # Send the request
+    future = POOL.submit(
+        requests.post,
+        f"{server}/translate/batch",
         json=payload
     )
     return future
 
 class MainWindow(QtWidgets.QMainWindow):
     glossReady = QtCore.Signal(str, dict)
+    toggle_mouse_follow_mode = QtCore.Signal(int)
 
     def __init__(self):
         super().__init__()
@@ -93,7 +114,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.search_bar = QtWidgets.QLineEdit()
         self.search_bar.setPlaceholderText("Search for a word...")
         left_vbox.addWidget(self.search_bar)
-        self.search_bar.returnPressed.connect(self.request_server_translate)
+        self.search_bar.returnPressed.connect(request_server_translate)
 
         # --- Mouse Follow Mode Toggle ---
         self.mouse_follow_checkbox = QtWidgets.QCheckBox("Mouse Follow Mode")
@@ -101,7 +122,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.mouse_follow_checkbox.stateChanged.connect(self.toggle_mouse_follow_mode)
         left_vbox.addWidget(self.mouse_follow_checkbox)
 
-        self.mouse_follow_mode = True  # Default enabled
+        self.mouse_follow_mode = False  # Default enabled
 
         self.list = QtWidgets.QListWidget()
         self.list.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
@@ -115,14 +136,26 @@ class MainWindow(QtWidgets.QMainWindow):
         hlayout.addWidget(self.details, 3)
 
         self.words: Dict[str, Dict] = {}
-        self.glosses: Dict[str, List[str]] = {}
+        # with the following structure:
+        # {
+        #     "word": {
+        #         "bbox": (x0, y0, x1, y1),  # Bounding box coordinates
+        #         "freq": int,  # Frequency of the word
+        #         "last_seen": float,  # Last seen timestamp
+        #         "translated": {
+        #             "word": "guten morgen",
+        #             "definitions": {
+        #                 "ADJ(A)": "guten morg -> good morning"
+        #             },
+        #             "html": "<span class=\"translation\">good morning</span>"
+        #         }
+        #     }
+        # }
 
         self.fc = 0
         self.t = QtCore.QElapsedTimer()
         self.t.start()
         QtCore.QTimer.singleShot(1000, self.update_fps)
-
-        self.glossReady.connect(self._update_gloss)
 
         # Start ScreenGrabber
         self.screen_grabber = ScreenGrabber()
@@ -135,8 +168,6 @@ class MainWindow(QtWidgets.QMainWindow):
         vbox.addWidget(self.loading_label)
         self.list.setEnabled(False)
         self.details.setEnabled(False)
-
-        QtCore.QTimer.singleShot(100, self.init_workers_async)
 
         # Prune timer
         QtCore.QTimer.singleShot(1000, self.prune_timer)
@@ -158,7 +189,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if now - self.last_ocr_time >= dynamic_ocr_interval:
             print("[DEBUG] Pushing frame to server")
             future = request_server_ocr(frame)
-            future.add_done_callback(self.on_ocr_future_done)
+            future.add_done_callback(self.ocr_on_future_done)
+            self.last_ocr_time = now  # Update last OCR time immediately
             def update_last_ocr_time(_):
                 self.last_ocr_time = now
             future.add_done_callback(update_last_ocr_time)
@@ -166,41 +198,68 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def ocr_on_future_done(self, future):
         try:
-            result = future.result()
-            # now we can update the glosses
+            result = future.result().json()
             if "error" in result:
                 print("[ERROR] OCR request failed:", result["error"])
                 return
             if "texts" not in result or not result["texts"]:
                 print("[ERROR] No texts found in the OCR result.")
                 return
-            """Translate text
             
-        if not result or not result['texts']:
-            raise HTTPException(status_code=404, detail="No text found in the image")
-        # Translate the texts if needed
-        translated_texts = translate_batch([text for text, _ in result['texts']])
-        # Combine original and translated texts
-        result['texts'] = [(text, bbox, translated) for (text, bbox), translated in zip(result['texts'], translated_texts)]
-        result['translated_texts'] = translated_texts
-        result['process_time'] = f"{result['process_time'] * 1000:.2f} ms"
-        """
-            for text, bbox in result["texts"]:
-                text = text.strip()
+            words_to_translate = []
+            for entry in result["texts"]:
+                text  = entry["text"].strip()
+                bbox  = entry["bbox"]
                 if not text:
                     continue
-                # Update the words dictionary
-                if text not in self.words:
-                    self.words[text] = {"bbox": bbox, "freq": 0, "last_seen": time.monotonic()}
-                else:
-                    self.words[text]["last_seen"] = time.monotonic()
-                self.words[text]["freq"] += 1
-                # update the glosses
-                if text not in self.glosses:
-                    self.glosses[text] = {}
-            self.refresh_list()
+
+                meta = self.words.setdefault(text, {"bbox": bbox, "freq": 0, "last_seen": 0})
+                meta["bbox"]      = bbox            # always keep most-recent bbox
+                meta["last_seen"] = time.monotonic()
+                meta["freq"]     += 1
+
+                words_to_translate.append(text)
+            if words_to_translate:
+                trans_future = request_server_translate_batch(words_to_translate)
+                trans_future.add_done_callback(self.on_translate_future_done)
+
+            # Safe refresh in GUI thread
+            QMetaObject.invokeMethod(
+                self, "refresh_list", Qt.QueuedConnection
+            )
         except Exception as e:
             print("[ERROR] OCR failed:", e)
+
+    def on_translate_future_done(self, future):
+        """
+        structure of response:
+        "translated": {
+            "word": "guten morgen",
+            "definitions": {
+                "ADJ(A)": "guten morg -> good morning"
+            },
+            "html": "<span class=\"translation\">good morning</span>"
+        }
+        """
+        try:
+            result = future.result().json()
+            # check if list, if not, make to list of 1
+            if not result:
+                print("[ERROR] No translations found in the result.")
+                return
+            for word_data in result['translated']:
+                # Update the words dictionary with translation
+                for word, meta in self.words.items():
+                    if word == word_data["word"]:
+                        meta["translated"] = word_data
+                        break
+            # Safe refresh in GUI thread
+            QMetaObject.invokeMethod(
+                self, "refresh_list", Qt.QueuedConnection
+            )
+        except Exception as e:
+            print("[ERROR] Translation failed:", e.with_traceback())
+            # print more debug
 
     def refresh_list(self):
         # Save scroll position and selected word
@@ -231,30 +290,25 @@ class MainWindow(QtWidgets.QMainWindow):
 
         scored = []
         for word, meta in self.words.items():
-            bbox = meta["bbox"]
-            # print(f"[DEBUG] Word '{word}' bbox: {bbox}")
             # Compute distance from mouse to bbox center
+            bbox = meta["bbox"]
             if mouse_video_pos is not None:
                 x0, y0, x1, y1 = bbox
                 cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
                 dist = ((mouse_video_pos[0] - cx) ** 2 + (mouse_video_pos[1] - cy) ** 2) ** 0.5
-                # print(f"[DEBUG] Distance from mouse to '{word}': {dist:.1f}")
             else:
                 dist = float('inf')
             score = meta["freq"]
-            # Sort by distance (closer first), then by frequency (higher first)
             scored.append((dist, -score, word))
 
         scored.sort()
-        t1 = time.time()
         self.list.clear()
-        MAX_LIST = 40  # Only show top 20 words
+        MAX_LIST = 40  # Only show top 40 words
         for _, _, word in scored[:MAX_LIST]:
-            gloss_data = self.glosses.get(word, {})
-            # --- Use ['definitions'] for the list ---
+            gloss_data = self.words[word].get("translated", {})
+            # print("self.words[word] = ", self.words[word])  
             definitions = gloss_data.get("definitions", {})
             first_def = ""
-            # Get the first available definition from any part of speech
             for pos, defs in definitions.items():
                 first_def = defs
             if first_def:
@@ -272,17 +326,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.list.addItem(item)
             self.list.setItemWidget(item, lbl)
 
-            # Restore selection if this is the previously selected word
             if selected_word and html.unescape(word) == selected_word:
                 item.setSelected(True)
 
-        # Restore scroll position
         self.list.verticalScrollBar().setValue(scroll_pos)
-        # Only update details if search bar is empty
         if not self.search_bar.text().strip():
             self.update_details()
-        t2 = time.time()
-        # print(f"[DEBUG] refresh_list: scoring {1000*(t1-t0):.1f}ms, list update {1000*(t2-t1):.1f}ms, total {1000*(t2-t0):.1f}ms")
 
     def update_fps(self):
         fps = self.fc / max(1, self.t.elapsed() / 1000)
@@ -296,21 +345,19 @@ class MainWindow(QtWidgets.QMainWindow):
     def prune(self):
         now = time.monotonic()
         for w in list(self.words):
-            if now - self.words[w]["last_seen"] >= dynamic_ocr_interval*2:
+            if now - self.words[w]["last_seen"] >= dynamic_ocr_interval*3:
                 del self.words[w]
         self.refresh_list()
 
     def prune_timer(self):
-        # Prune words that have exceeded the miss limit
         self.prune()
-        # Restart the timer
         QtCore.QTimer.singleShot(1000, self.prune_timer)
 
     def update_details(self):
         # Only update details if search bar is empty
         if self.search_bar.text().strip():
             return
-        self._search_active = False  # <-- Add this line at the start
+        self._search_active = False
         # If a word is selected, use that; otherwise, use the top word in the list
         selected_items = self.list.selectedItems()
         if selected_items:
@@ -326,7 +373,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.details.clear()
             return
         word = html.unescape(selected_lbl.text().split("<br>")[0].replace("<b>", "").replace("</b>", ""))
-        gloss_data = self.glosses.get(word, None)
+        gloss_data = self.words[word].get("translated", {})
         details_html = f"<h2>{html.escape(word)}</h2>"
         # --- Render the 'html' field for details ---
         if gloss_data is None:
@@ -335,11 +382,3 @@ class MainWindow(QtWidgets.QMainWindow):
             html_content = gloss_data.get("html", "")
             details_html += html_content
         self.details.setHtml(details_html)
-        # Do not scroll the selected word to the top!
-
-    @QtCore.Slot(str, dict)
-    def _update_gloss(self, word: str, translation_data: dict):
-        if translation_data:
-            self.glosses[word] = translation_data
-            self.refresh_list()
-            self.update_details()

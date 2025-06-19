@@ -26,9 +26,6 @@ def process_frame(frame: np.ndarray) -> dict:
     }
     """
     texts = ocr_worker.process_frame(frame)
-    # return in json serializable format
-    import pprint
-    pprint.pprint(texts)
     return {
         "texts": [
             {
@@ -101,6 +98,13 @@ async def ocr_image(payload: ImageRequest):
 async def translate_text(req: TextRequest):
     print(f"Received text for translation: {req.text}")
     return {"translated": translate(req.text)}
+
+@app.post("/translate/batch")
+async def translate_batch_texts(req: list[TextRequest]):
+    texts = [item.text for item in req]
+    print(f"Received batch for translation: {texts}")
+    translated_texts = translate_batch(texts)
+    return {"translated": translated_texts}
 
 if __name__ == "__main__":
     import uvicorn
