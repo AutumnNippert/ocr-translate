@@ -205,7 +205,15 @@ class MainWindow(QtWidgets.QMainWindow):
             if "texts" not in result or not result["texts"]:
                 print("[ERROR] No texts found in the OCR result.")
                 return
-            
+
+            # --- ENABLE widgets after first OCR result ---
+            if not self.list.isEnabled():
+                QMetaObject.invokeMethod(self.list, "setEnabled", Qt.QueuedConnection, QtCore.Q_ARG(bool, True))
+            if not self.details.isEnabled():
+                QMetaObject.invokeMethod(self.details, "setEnabled", Qt.QueuedConnection, QtCore.Q_ARG(bool, True))
+            if self.loading_label.isVisible():
+                QMetaObject.invokeMethod(self.loading_label, "hide", Qt.QueuedConnection)
+
             words_to_translate = []
             for entry in result["texts"]:
                 text  = entry["text"].strip()
@@ -306,13 +314,16 @@ class MainWindow(QtWidgets.QMainWindow):
         MAX_LIST = 40  # Only show top 40 words
         for _, _, word in scored[:MAX_LIST]:
             gloss_data = self.words[word].get("translated", {})
-            # print("self.words[word] = ", self.words[word])  
             definitions = gloss_data.get("definitions", {})
             first_def = ""
+            first_pos = ""
             for pos, defs in definitions.items():
                 first_def = defs
+                first_pos = pos
+                break
             if first_def:
-                html_txt = f"<b>{html.escape(word)}</b><br><i>{html.escape(first_def)}</i>"
+                # --- Make definition clickable if possible ---
+                html_txt = f"<b>{html.escape(word)}</b><br><a href=\"#def\">{html.escape(first_def)}</a>"
             else:
                 html_txt = f"<b>{html.escape(word)}</b>"
 
@@ -321,6 +332,8 @@ class MainWindow(QtWidgets.QMainWindow):
             lbl.setTextFormat(QtCore.Qt.RichText)
             lbl.setWordWrap(True)
             lbl.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+            lbl.setOpenExternalLinks(False)
+            lbl.linkActivated.connect(lambda link, w=word: self.show_definition(w))
 
             item.setSizeHint(lbl.sizeHint())
             self.list.addItem(item)
@@ -332,6 +345,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.list.verticalScrollBar().setValue(scroll_pos)
         if not self.search_bar.text().strip():
             self.update_details()
+
+    def show_definition(self, word):
+        # Show full details for the word when link is clicked
+        self.details.setHtml(self.render_details_html(word))
+
+    def render_details_html(self, word):
+        # Check self.words[word] exists
+        if word not in self.words:
+            return f"<h2>{html.escape(word)}</h2><i>Word not found</i>"
+        gloss_data = self.words[word].get("translated", {})
+        details_html = f"<h2>{html.escape(word)}</h2>"
+        if not gloss_data:
+            details_html += "<i>Translating...</i>"
+        else:
+            html_content = gloss_data.get("html", "")
+            details_html += html_content
+        return details_html
 
     def update_fps(self):
         fps = self.fc / max(1, self.t.elapsed() / 1000)
@@ -345,7 +375,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def prune(self):
         now = time.monotonic()
         for w in list(self.words):
-            if now - self.words[w]["last_seen"] >= dynamic_ocr_interval*3:
+            if now - self.words[w]["last_seen"] >= 60:
                 del self.words[w]
         self.refresh_list()
 
@@ -373,12 +403,4 @@ class MainWindow(QtWidgets.QMainWindow):
             self.details.clear()
             return
         word = html.unescape(selected_lbl.text().split("<br>")[0].replace("<b>", "").replace("</b>", ""))
-        gloss_data = self.words[word].get("translated", {})
-        details_html = f"<h2>{html.escape(word)}</h2>"
-        # --- Render the 'html' field for details ---
-        if gloss_data is None:
-            details_html += "<i>Translating...</i>"
-        else:
-            html_content = gloss_data.get("html", "")
-            details_html += html_content
-        self.details.setHtml(details_html)
+        self.details.setHtml(self.render_details_html(word))

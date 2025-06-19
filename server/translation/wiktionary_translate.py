@@ -125,11 +125,7 @@ def get_word(word: str, language: str = "German") -> dict:
         cache_file.write(str(german_section))
     return data
 
-def translate(word: str) -> str:
-    analysis = tagger_de.analyze(word)
-    print(f"Analysis for word '{word}': {analysis}")
-    lemma = analysis[0]
-    pos = analysis[1]
+def translate(lemma: str, pos: str) -> str:
     if str(pos).startswith('N'):
         lemma = lemma.capitalize()
     else:

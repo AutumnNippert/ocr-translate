@@ -8,8 +8,11 @@ import base64
 import io
 import queue
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from ocr.paddle_ocr_worker import OCRWorker
-from translation.argos_translate import translate
+from translation.translator import translate
 
 app = FastAPI()
 ocr_worker = OCRWorker(queue.Queue(2))  # Reuse across requests
@@ -43,6 +46,7 @@ def translate_batch(texts: list[str]) -> list[str]:
     """
     translated_texts = []
     for text in texts:
+        print(f"Translating text: {text}")
         translated_text = translate(text)
         translated_texts.append(translated_text)
     return translated_texts

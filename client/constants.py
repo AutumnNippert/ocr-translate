@@ -12,5 +12,5 @@ FONT_SIZE_PT     = 12
 TESS_FAST_CFG    = "--oem 1 --psm 6"
 TESS_DEEP_CFG    = "--oem 1 --psm 7"
 
-CAPTURE_FPS_CAP  = 60
+CAPTURE_FPS_CAP  = 15
 TESSERACT_CMD    = "/usr/bin/tesseract"

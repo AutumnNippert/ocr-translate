@@ -1,20 +1,24 @@
 import os
+import sys
 import time
 import numpy as np
 from PySide6 import QtCore
 from mss import mss
 from constants import CAPTURE_FPS_CAP
-import dbus
-import dbus.mainloop.glib
-import gi
-gi.require_version('GLib', '2.0')
-gi.require_version('Gst', '1.0')
-from gi.repository import GLib, Gst
 from helpers.logging import debug
 
-dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
-
 DEBUG_OVERRIDE = True  # Set to True to force debug output regardless of DEBUG_LEVEL
+
+# Only import Wayland/portal/GStreamer stuff on Linux with Wayland
+IS_WAYLAND = sys.platform.startswith("linux") and os.environ.get("WAYLAND_DISPLAY") is not None
+if IS_WAYLAND:
+    import dbus
+    import dbus.mainloop.glib
+    import gi
+    gi.require_version('GLib', '2.0')
+    gi.require_version('Gst', '1.0')
+    from gi.repository import GLib, Gst
+    dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
 
 class ScreenGrabber(QtCore.QThread):
     frameCaptured = QtCore.Signal(np.ndarray)
@@ -23,9 +27,10 @@ class ScreenGrabber(QtCore.QThread):
         super().__init__()
         self.id = id
         self._run = True
-        self.is_wayland = os.environ.get("WAYLAND_DISPLAY") is not None
+        self.is_wayland = IS_WAYLAND
+        self.is_windows = sys.platform.startswith("win")
 
-        # Always get monitor geometries at init (for both X11 and Wayland)
+        # Always get monitor geometries at init (for all platforms)
         with mss() as s:
             self.monitors = s.monitors  # List of monitor dicts
             if id < len(self.monitors):
@@ -42,11 +47,14 @@ class ScreenGrabber(QtCore.QThread):
                 self.capture_w = mon['width']
                 self.capture_h = mon['height']
 
-        if not self.is_wayland:
-            self.setObjectName(f"ScreenGrabber-{id}")
-            debug(f"ScreenGrabber initialized for X11 monitor {id}: {self.capture_x}, {self.capture_y}, {self.capture_w}, {self.capture_h}", debug_override=DEBUG_OVERRIDE)
-        else:
+        if self.is_wayland:
             debug(f"ScreenGrabber initialized for Wayland (ScreenCast) monitor {id}: {self.capture_x}, {self.capture_y}, {self.capture_w}, {self.capture_h}", debug_override=DEBUG_OVERRIDE)
+        elif self.is_windows:
+            self.setObjectName(f"ScreenGrabber-Windows-{id}")
+            debug(f"ScreenGrabber initialized for Windows monitor {id}: {self.capture_x}, {self.capture_y}, {self.capture_w}, {self.capture_h}", debug_override=DEBUG_OVERRIDE)
+        else:
+            self.setObjectName(f"ScreenGrabber-X11-{id}")
+            debug(f"ScreenGrabber initialized for X11 monitor {id}: {self.capture_x}, {self.capture_y}, {self.capture_w}, {self.capture_h}", debug_override=DEBUG_OVERRIDE)
 
     def run(self):
         if self.is_wayland:
@@ -60,6 +68,7 @@ class ScreenGrabber(QtCore.QThread):
             options = {'session_handle_token': token}
             session_path = None
             response = {}
+            create_loop = GLib.MainLoop()
 
             def handle_response(response_id, results, **kwargs):
                 debug(f"[Wayland] handle_response called: response_id={response_id}, results={results}", debug_override=DEBUG_OVERRIDE)
@@ -67,6 +76,7 @@ class ScreenGrabber(QtCore.QThread):
                 if response_id == 0 and ('session_handle' in results or 'handle' in results):
                     session_path = results.get('session_handle') or results.get('handle')
                     response = results
+                create_loop.quit()
 
             bus.add_signal_receiver(
                 handle_response,
@@ -76,25 +86,22 @@ class ScreenGrabber(QtCore.QThread):
             )
             debug("[Wayland] Creating session...", debug_override=DEBUG_OVERRIDE)
             iface.CreateSession(options, dbus_interface='org.freedesktop.portal.ScreenCast')
-
-            # Wait for session_path with timeout
-            for _ in range(100):
-                if session_path:
-                    break
-                time.sleep(0.05)
+            create_loop.run()
             bus.remove_signal_receiver(handle_response)
             if not session_path:
-                debug("[Wayland] Failed to create portal session (timeout).", debug_override=DEBUG_OVERRIDE)
+                debug("[Wayland] Failed to create portal session.", debug_override=DEBUG_OVERRIDE)
                 return
 
             # --- 2. Select sources ---
             select_options = {'types': dbus.UInt32(1)}
             select_done = False
+            select_loop = GLib.MainLoop()
 
             def handle_select_response(response_id, results, **kwargs):
                 debug(f"[Wayland] handle_select_response: response_id={response_id}, results={results}", debug_override=DEBUG_OVERRIDE)
                 nonlocal select_done
                 select_done = (response_id == 0)
+                select_loop.quit()
 
             bus.add_signal_receiver(
                 handle_select_response,
@@ -104,18 +111,16 @@ class ScreenGrabber(QtCore.QThread):
             )
             debug("[Wayland] Selecting sources...", debug_override=DEBUG_OVERRIDE)
             iface.SelectSources(session_path, select_options, dbus_interface='org.freedesktop.portal.ScreenCast')
-            for _ in range(100):
-                if select_done:
-                    break
-                time.sleep(0.05)
+            select_loop.run()
             bus.remove_signal_receiver(handle_select_response)
             if not select_done:
-                debug("[Wayland] Failed to select sources (timeout).", debug_override=DEBUG_OVERRIDE)
+                debug("[Wayland] Failed to select sources.", debug_override=DEBUG_OVERRIDE)
                 return
 
             # --- 3. Start session ---
             start_done = False
             start_results = {}
+            start_loop = GLib.MainLoop()
 
             def handle_start_response(response_id, results, **kwargs):
                 debug(f"[Wayland] handle_start_response: response_id={response_id}, results={results}", debug_override=DEBUG_OVERRIDE)
@@ -123,6 +128,7 @@ class ScreenGrabber(QtCore.QThread):
                 start_done = (response_id == 0)
                 if start_done:
                     start_results = results
+                start_loop.quit()
 
             bus.add_signal_receiver(
                 handle_start_response,
@@ -133,13 +139,10 @@ class ScreenGrabber(QtCore.QThread):
             app_id = "screen-cap-translate"
             debug(f"[Wayland] session_path before Start: {session_path!r}", debug_override=DEBUG_OVERRIDE)
             iface.Start(session_path, app_id, {}, dbus_interface='org.freedesktop.portal.ScreenCast')
-            for _ in range(100):
-                if start_done:
-                    break
-                time.sleep(0.05)
+            start_loop.run()
             bus.remove_signal_receiver(handle_start_response)
             if not start_done:
-                debug("[Wayland] Failed to start session (timeout).", debug_override=DEBUG_OVERRIDE)
+                debug("[Wayland] Failed to start session.", debug_override=DEBUG_OVERRIDE)
                 return
 
             # --- 4. Get PipeWire node ID ---
@@ -182,9 +185,12 @@ class ScreenGrabber(QtCore.QThread):
             appsink.set_property("drop", True)
             pipeline.set_state(Gst.State.PLAYING)
 
+            debug("[Wayland] GStreamer pipeline started successfully.", debug_override=DEBUG_OVERRIDE)
+
             prev = 0
             no_frame_count = 0
             while self._run:
+                debug(f"[Wayland] Waiting for frames from PipeWire node {node_id}...", debug_override=False)
                 if time.time() - prev < 1 / CAPTURE_FPS_CAP:
                     time.sleep(.002)
                     continue
@@ -212,6 +218,7 @@ class ScreenGrabber(QtCore.QThread):
                         no_frame_count = 0
             pipeline.set_state(Gst.State.NULL)
         else:
+            # Windows and X11: use mss
             with mss() as s:
                 mon = self.monitors[self.id]
                 prev = 0
