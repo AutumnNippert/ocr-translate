@@ -7,7 +7,11 @@ import sys
 
 from translation.wiktionary_translate import translate as wiktionary_translate
 from translation.argos_translate import translate as argos_translate
-from translation.google_translate import translate as google_translate
+
+#check if env GOOGLE_APPLICATION_CREDENTIALS is set
+use_google = 'GOOGLE_APPLICATION_CREDENTIALS' in os.environ
+if use_google:
+    from translation.google_translate import translate as google_translate
 
 from HanTa import HanoverTagger as ht
 tagger_de = ht.HanoverTagger('morphmodel_ger.pgz')
@@ -108,11 +112,12 @@ def translate(word: str) -> dict:
         cache.set(word_key, argos_result)
         return argos_result
 
-    # Fallback to Google Translate
-    google_result = google_translate(word, pos)
-    if google_result and isinstance(google_result, dict) and 'definitions' in google_result:
-        cache.set(word_key, google_result)
-        return google_result
+    if use_google:
+        # Fallback to Google Translate
+        google_result = google_translate(word, pos)
+        if google_result and isinstance(google_result, dict) and 'definitions' in google_result:
+            cache.set(word_key, google_result)
+            return google_result
 
     # If all fail
     result = {

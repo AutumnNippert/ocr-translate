@@ -279,9 +279,10 @@ class MainWindow(QtWidgets.QMainWindow):
             if selected_lbl:
                 selected_word = html.unescape(selected_lbl.text().split("<br>")[0].replace("<b>", "").replace("</b>", ""))
 
-        # Compute mouse position in capture area coordinates
+        # --- Mouse tracking for sorting ---
         mouse_video_pos = None
-        if self.mouse_follow_mode:
+        if self.mouse_follow_checkbox.isChecked():
+            self.mouse_follow_mode = True
             global_mouse_pos = QtGui.QCursor.pos()
             mx, my = global_mouse_pos.x(), global_mouse_pos.y()
             capture_x = self.screen_grabber.capture_x
@@ -294,11 +295,11 @@ class MainWindow(QtWidgets.QMainWindow):
             else:
                 mouse_video_pos = None
         else:
+            self.mouse_follow_mode = False
             mouse_video_pos = None
 
         scored = []
         for word, meta in self.words.items():
-            # Compute distance from mouse to bbox center
             bbox = meta["bbox"]
             if mouse_video_pos is not None:
                 x0, y0, x1, y1 = bbox
@@ -322,8 +323,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 first_pos = pos
                 break
             if first_def:
-                # --- Make definition clickable if possible ---
-                html_txt = f"<b>{html.escape(word)}</b><br><a href=\"#def\">{html.escape(first_def)}</a>"
+                # --- Italicized, dark gray description ---
+                html_txt = (
+                    f"<b>{html.escape(word)}</b><br>"
+                    f"<span style=\"color:#444; font-style:italic;\">{html.escape(first_def)}</span>"
+                )
             else:
                 html_txt = f"<b>{html.escape(word)}</b>"
 
@@ -333,6 +337,7 @@ class MainWindow(QtWidgets.QMainWindow):
             lbl.setWordWrap(True)
             lbl.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
             lbl.setOpenExternalLinks(False)
+            # Clicking the word still shows details
             lbl.linkActivated.connect(lambda link, w=word: self.show_definition(w))
 
             item.setSizeHint(lbl.sizeHint())
