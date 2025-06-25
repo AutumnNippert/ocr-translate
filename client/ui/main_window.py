@@ -1,7 +1,7 @@
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import QMetaObject, Qt
 import html
-from typing import Dict, List
+from typing import Dict
 import numpy as np
 from screen_capture.screen_grabber import ScreenGrabber
 import concurrent.futures
@@ -159,7 +159,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Start ScreenGrabber
         self.screen_grabber = ScreenGrabber()
-        self.screen_grabber.frameCaptured.connect(self.on_frame)
+        self.screen_grabber.frameCaptured.connect(self.on_frame_list)
         self.screen_grabber.start()
 
         # Loading label
@@ -183,13 +183,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.last_ocr_time = time.monotonic()
 
     @QtCore.Slot(np.ndarray)
-    def on_frame(self, frame):
+    def on_frame_list(self, frame_list):
         now = time.monotonic()
         global dynamic_ocr_interval
         if now - self.last_ocr_time >= dynamic_ocr_interval:
             print("[DEBUG] Pushing frame to server")
-            future = request_server_ocr(frame)
-            future.add_done_callback(self.ocr_on_future_done)
+            for frame in frame_list:
+                future = request_server_ocr(frame)
+                future.add_done_callback(self.ocr_on_future_done)
             self.last_ocr_time = now  # Update last OCR time immediately
             def update_last_ocr_time(_):
                 self.last_ocr_time = now
@@ -225,6 +226,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 meta["bbox"]      = bbox            # always keep most-recent bbox
                 meta["last_seen"] = time.monotonic()
                 meta["freq"]     += 1
+
+                # if the source word was non alphabetic, skip translation
+                if not text.isalpha():
+                    continue
 
                 words_to_translate.append(text)
             if words_to_translate:

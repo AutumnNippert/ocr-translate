@@ -1,17 +1,20 @@
 import numpy as np
 from time import time
 from paddleocr import PaddleOCR
-import os
-os.nice(10)  # lower priority
+
 
 # Initialize PaddleOCR (lighter config for real-time)
 ocr = PaddleOCR(
-    ocr_version='PP-OCRv3',
+    ocr_version="PP-OCRv3",
+    device="cpu",              # "gpu" or "gpu:0" for CUDA
     use_doc_orientation_classify=False,
-    det_limit_side_len=512,
     use_doc_unwarping=False,
-    use_textline_orientation=False
+    use_textline_orientation=False,
+    # text_det_limit_side_len=512  # ← renamed in 3.x
 )
+
+
+print("[OCRWorker] PaddleOCR initialized")
 
 def clean_text(text: str) -> list[str]:
     text = text.replace("'", "").replace('"', '').replace('`', '')

@@ -4,11 +4,14 @@ import os
 import atexit
 import signal
 import sys
+import platform
 
 from translation.wiktionary_translate import translate as wiktionary_translate
-from translation.argos_translate import translate as argos_translate
 
-#check if env GOOGLE_APPLICATION_CREDENTIALS is set
+is_linux = platform.system() == 'Linux'
+if is_linux:
+    from translation.argos_translate import translate as argos_translate
+    
 use_google = 'GOOGLE_APPLICATION_CREDENTIALS' in os.environ
 if use_google:
     from translation.google_translate import translate as google_translate
@@ -104,13 +107,14 @@ def translate(word: str) -> dict:
             'html': f'<span class="translation">{word}</span>'
         }
     
-    # Try Argos next
-    argos_result = argos_translate(word, pos)
-    if argos_result and isinstance(argos_result, dict) and 'definitions' in argos_result:
-        import pprint
-        print(f"Cached result for '{word}': {pprint.pformat(argos_result)}")
-        cache.set(word_key, argos_result)
-        return argos_result
+    if is_linux:
+        # Try Argos next
+        argos_result = argos_translate(word, pos)
+        if argos_result and isinstance(argos_result, dict) and 'definitions' in argos_result:
+            import pprint
+            print(f"Cached result for '{word}': {pprint.pformat(argos_result)}")
+            cache.set(word_key, argos_result)
+            return argos_result
 
     if use_google:
         # Fallback to Google Translate

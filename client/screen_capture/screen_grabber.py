@@ -21,7 +21,7 @@ if IS_WAYLAND:
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
 
 class ScreenGrabber(QtCore.QThread):
-    frameCaptured = QtCore.Signal(np.ndarray)
+    frameCaptured = QtCore.Signal(list)
 
     def __init__(self, id=1):
         super().__init__()
@@ -204,7 +204,28 @@ class ScreenGrabber(QtCore.QThread):
                         dtype=np.uint8,
                     )
                     debug(f"[Wayland] Frame captured at {time.time():.3f}", debug_override=False)
-                    self.frameCaptured.emit(arr.copy())
+                    frame = arr.copy()
+
+
+                    #preprocess frame using cv2 to convert to grayscale and select text areas\
+                    import cv2
+                    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                    _, mask = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY)
+                    frame_final = cv2.bitwise_and(gray, gray, mask=mask)
+                    _, new_frame = cv2.threshold(frame_final, 180, 255, cv2.THRESH_BINARY)  # for black text , cv.THRESH_BINARY_INV
+                    kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))  # to manipulate the orientation of dilution , large x means horizonatally dilating  more, large y means vertically dilating more
+                    dilated = cv2.dilate(new_frame, kernel, iterations=9)  # dilate , more the iteration more the dilation
+                    contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)  # findContours returns 3 variables for getting contours
+
+                    frames = []
+                    for contour in contours:
+                        [x, y, w, h] = cv2.boundingRect(contour)
+                        if w < 35 and h < 35:
+                            continue
+                        processed_frame = frame[y:y + h, x:x + w]
+                        frames.append(processed_frame)
+
+                    self.frameCaptured.emit(frames)
                     no_frame_count = 0
                 else:
                     no_frame_count += 1

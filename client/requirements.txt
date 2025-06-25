@@ -1,0 +1,6 @@
+pyside6
+mss
+requests
+numpy
+pillow
+opencv-python

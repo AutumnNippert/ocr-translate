@@ -110,6 +110,10 @@ async def translate_batch_texts(req: list[TextRequest]):
     translated_texts = translate_batch(texts)
     return {"translated": translated_texts}
 
-if __name__ == "__main__":
+def main():
+    # run in the server directory with the command `uvicorn server:app --reload`
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8000, workers=1)
+
+if __name__ == "__main__":
+    main()

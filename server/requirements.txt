@@ -1,0 +1,13 @@
+pandas
+paddlepaddle
+paddleocr
+beautifulsoup4
+fastapi
+uvicorn
+pydantic
+HanTa
+requests
+argostranslate
+python-multipart
+# for google translate
+google-cloud-translate
